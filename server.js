@@ -1,8 +1,21 @@
+
+/*
+  === GUÍA DE INSTALACIÓN DEL BACKEND ===
+  
+  1. Crea una carpeta nueva para el backend (fuera de este proyecto React si es posible, o en la raíz).
+  2. Copia este archivo como 'server.js'.
+  3. Ejecuta en la terminal de esa carpeta: npm init -y
+  4. Instala las dependencias: 
+     npm install express mongoose multer multer-gridfs-storage cors dotenv
+  5. Ejecuta el servidor: node server.js
+*/
+
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const { GridFsStorage } = require('multer-gridfs-storage');
 const cors = require('cors');
+const Grid = require('gridfs-stream'); // Importación movida arriba para evitar errores de referencia
 require('dotenv').config();
 
 const app = express();
@@ -13,24 +26,27 @@ app.use(cors());
 app.use(express.json());
 
 // 1. Conexión a MongoDB Atlas
-// NOTA: He limpiado los caracteres '<' y '>' de la contraseña y agregado el nombre de la DB 'vision_cali_db'
 const mongoURI = "mongodb+srv://Snei88:Sneider1112039944.@cluster0.1hhkn.mongodb.net/vision_cali_db?appName=Cluster0";
 
-const conn = mongoose.createConnection(mongoURI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+// Configuración de conexión optimizada para Node 22+ y Mongoose 7+
+// Eliminamos opciones depreciadas como useNewUrlParser/useUnifiedTopology que causan errores
+const conn = mongoose.createConnection(mongoURI);
 
 // Inicializar GridFS (Sistema de archivos de Mongo)
 let gfs, gridfsBucket;
 
-conn.once('open', () => {
-  gridfsBucket = new mongoose.mongo.GridFSBucket(conn.db, {
-    bucketName: 'uploads'
-  });
-  gfs = Grid(conn.db, mongoose.mongo);
-  gfs.collection('uploads');
-  console.log('✅ Conectado a MongoDB Atlas y GridFS inicializado');
+conn.on('connected', () => {
+    console.log('✅ Conectado exitosamente a MongoDB Atlas');
+    gridfsBucket = new mongoose.mongo.GridFSBucket(conn.db, {
+        bucketName: 'uploads'
+    });
+    gfs = Grid(conn.db, mongoose.mongo);
+    gfs.collection('uploads');
+});
+
+conn.on('error', (err) => {
+    console.error('❌ Error de conexión a MongoDB:', err);
+    console.error('⚠️  IMPORTANTE: Asegúrate de haber agregado la IP 0.0.0.0/0 en Network Access de MongoDB Atlas.');
 });
 
 // 2. Configurar Motor de Almacenamiento (Storage Engine)
@@ -50,11 +66,11 @@ const upload = multer({ storage });
 
 // 0. Health Check (Para verificar estado desde el Frontend)
 app.get('/api/health', (req, res) => {
-  const dbState = mongoose.connection.readyState; // 0: disconnected, 1: connected
+  const dbState = conn.readyState; // 0: disconnected, 1: connected
   res.json({ 
     status: 'ok', 
-    message: 'Backend Online',
-    dbConnected: conn.readyState === 1 
+    message: dbState === 1 ? 'Backend Online y DB Conectada' : 'Backend Online pero DB Desconectada',
+    dbConnected: dbState === 1 
   });
 });
 
@@ -71,6 +87,10 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 // B. Descargar Archivo (Stream directo desde Mongo al navegador)
 app.get('/api/files/:filename', async (req, res) => {
   try {
+    if (!gfs) {
+        return res.status(500).json({ error: 'Base de datos no inicializada aún' });
+    }
+
     const file = await gfs.files.findOne({ filename: req.params.filename });
     
     if (!file) {
@@ -95,6 +115,7 @@ app.get('/api/files/:filename', async (req, res) => {
 // C. Eliminar Archivo
 app.delete('/api/files/:id', async (req, res) => {
   try {
+    if (!gridfsBucket) return res.status(500).json({ error: 'DB no lista' });
     await gridfsBucket.delete(new mongoose.Types.ObjectId(req.params.id));
     res.json({ message: 'Archivo eliminado' });
   } catch (err) {
@@ -104,6 +125,3 @@ app.delete('/api/files/:id', async (req, res) => {
 
 // Iniciar Servidor
 app.listen(port, () => console.log(`🚀 Servidor Backend corriendo en puerto ${port}`));
-
-// Helper function for GridFS stream
-const Grid = require('gridfs-stream');
