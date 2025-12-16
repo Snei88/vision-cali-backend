@@ -1,42 +1,61 @@
 
 /*
-  === GUÍA DE INSTALACIÓN DEL BACKEND ===
-  
-  1. Crea una carpeta nueva para el backend (fuera de este proyecto React si es posible, o en la raíz).
-  2. Copia este archivo como 'server.js'.
-  3. Ejecuta en la terminal de esa carpeta: npm init -y
-  4. Instala las dependencias: 
-     npm install express mongoose multer multer-gridfs-storage cors dotenv
-  5. Ejecuta el servidor: node server.js
+  === BACKEND VISIÓN CALI 500+ ===
+  Servidor robusto con Logging detallado para depuración.
 */
+
+console.log("---------------------------------------------------");
+console.log("🚀 [BACKEND] Iniciando script del servidor...");
+console.log("---------------------------------------------------");
 
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
 const { GridFsStorage } = require('multer-gridfs-storage');
 const cors = require('cors');
-const Grid = require('gridfs-stream'); // Importación movida arriba para evitar errores de referencia
+const Grid = require('gridfs-stream');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 8080;
 
-// Middleware
-app.use(cors());
+// 1. LOGGING DE PETICIONES (Middleware Global)
+app.use((req, res, next) => {
+    console.log(`📨 [REQUEST] ${req.method} ${req.originalUrl}`);
+    console.log(`   👉 Origen: ${req.headers.origin || 'Desconocido'}`);
+    next();
+});
+
+// 2. CONFIGURACIÓN CORS ROBUSTA
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Authorization, X-API-KEY, Origin, X-Requested-With, Content-Type, Accept, Access-Control-Allow-Request-Method');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+    res.header('Allow', 'GET, POST, OPTIONS, PUT, DELETE');
+    
+    if (req.method === 'OPTIONS') {
+        console.log(`✅ [CORS] Respondiendo OK a Preflight OPTIONS`);
+        return res.sendStatus(200);
+    }
+    next();
+});
+
 app.use(express.json());
 
-// 1. Conexión a MongoDB Atlas
+// 3. CONEXIÓN MONGODB ATLAS
 const mongoURI = "mongodb+srv://Snei88:Sneider1112039944.@cluster0.1hhkn.mongodb.net/vision_cali_db?appName=Cluster0";
 
-// Configuración de conexión optimizada para Node 22+ y Mongoose 7+
-// Eliminamos opciones depreciadas como useNewUrlParser/useUnifiedTopology que causan errores
-const conn = mongoose.createConnection(mongoURI);
+console.log("🔌 [DB] Intentando conectar a MongoDB Atlas...");
 
-// Inicializar GridFS (Sistema de archivos de Mongo)
+const conn = mongoose.createConnection(mongoURI, {
+    serverSelectionTimeoutMS: 5000, 
+    socketTimeoutMS: 45000,
+});
+
 let gfs, gridfsBucket;
 
 conn.on('connected', () => {
-    console.log('✅ Conectado exitosamente a MongoDB Atlas');
+    console.log('✅ [DB] ¡Conexión exitosa a MongoDB Atlas!');
     gridfsBucket = new mongoose.mongo.GridFSBucket(conn.db, {
         bucketName: 'uploads'
     });
@@ -45,83 +64,117 @@ conn.on('connected', () => {
 });
 
 conn.on('error', (err) => {
-    console.error('❌ Error de conexión a MongoDB:', err);
-    console.error('⚠️  IMPORTANTE: Asegúrate de haber agregado la IP 0.0.0.0/0 en Network Access de MongoDB Atlas.');
+    console.error('❌ [DB] Error crítico de conexión:', err.message);
 });
 
-// 2. Configurar Motor de Almacenamiento (Storage Engine)
+conn.on('disconnected', () => {
+    console.warn('⚠️ [DB] Desconectado de MongoDB');
+});
+
+// 4. CONFIGURACIÓN MULTER
 const storage = new GridFsStorage({
-  url: mongoURI,
-  file: (req, file) => {
-    return {
-      filename: `${Date.now()}-vis-cali-${file.originalname}`,
-      bucketName: 'uploads' // Coincide con la colección
-    };
-  }
+    url: mongoURI,
+    options: { useUnifiedTopology: true },
+    file: (req, file) => {
+        return new Promise((resolve, reject) => {
+            console.log(`💾 [STORAGE] Preparando guardado para: ${file.originalname}`);
+            const filename = `${Date.now()}_${file.originalname.replace(/\s+/g, '_')}`;
+            const fileInfo = {
+                filename: filename,
+                bucketName: 'uploads'
+            };
+            resolve(fileInfo);
+        });
+    }
 });
 
-const upload = multer({ storage });
+const upload = multer({ 
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 }
+});
 
-// --- RUTAS DE LA API ---
+// --- RUTAS ---
 
-// 0. Health Check (Para verificar estado desde el Frontend)
+app.get('/', (req, res) => {
+    console.log("👋 [ROOT] Visita a la raíz del servidor");
+    res.send(`
+        <div style="font-family: monospace; padding: 20px;">
+            <h1>🚀 Backend Visión Cali 500+</h1>
+            <p>Estado Servidor: <strong>ONLINE</strong></p>
+            <p>Estado DB: <strong>${conn.readyState === 1 ? '🟢 CONECTADA' : '🔴 DESCONECTADA'}</strong></p>
+            <hr>
+            <p>Logs activos. Revisa la consola de Zeabur.</p>
+        </div>
+    `);
+});
+
 app.get('/api/health', (req, res) => {
-  const dbState = conn.readyState; // 0: disconnected, 1: connected
-  res.json({ 
-    status: 'ok', 
-    message: dbState === 1 ? 'Backend Online y DB Conectada' : 'Backend Online pero DB Desconectada',
-    dbConnected: dbState === 1 
-  });
+    console.log(`💓 [HEALTH] Chequeo de salud solicitado. Estado DB: ${conn.readyState}`);
+    res.json({ 
+        status: 'online', 
+        dbState: conn.readyState,
+        message: conn.readyState === 1 ? 'System Operational' : 'DB Connecting...'
+    });
 });
 
-// A. Subir Archivo (Soporta archivos grandes por stream)
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if(!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
-  
-  res.json({ 
-    file: req.file, 
-    message: 'Archivo subido exitosamente a Atlas' 
-  });
-});
-
-// B. Descargar Archivo (Stream directo desde Mongo al navegador)
-app.get('/api/files/:filename', async (req, res) => {
-  try {
-    if (!gfs) {
-        return res.status(500).json({ error: 'Base de datos no inicializada aún' });
-    }
-
-    const file = await gfs.files.findOne({ filename: req.params.filename });
+app.post('/api/upload', (req, res) => {
+    console.log("📤 [UPLOAD] Iniciando proceso de subida...");
     
-    if (!file) {
-      return res.status(404).json({ error: 'Archivo no encontrado' });
-    }
+    const uploadSingle = upload.single('file');
 
-    // Check if image or pdf to set correct header
-    if (file.contentType === 'application/pdf' || file.contentType === 'image/jpeg' || file.contentType === 'image/png') {
-       res.set('Content-Type', file.contentType);
-    } else {
-       res.set('Content-Disposition', `attachment; filename="${file.filename}"`);
-    }
+    uploadSingle(req, res, function (err) {
+        if (err) {
+            console.error('❌ [UPLOAD ERROR]', err);
+            return res.status(500).json({ error: err.message });
+        }
 
-    const readStream = gridfsBucket.openDownloadStream(file._id);
-    readStream.pipe(res);
+        if (!req.file) {
+            console.warn('⚠️ [UPLOAD] Petición recibida pero sin archivo.');
+            return res.status(400).json({ error: 'No se envió ningún archivo' });
+        }
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        console.log(`✅ [UPLOAD SUCCESS] Archivo guardado: ${req.file.filename}`);
+        res.json({ 
+            file: req.file, 
+            message: 'Subida exitosa',
+            filename: req.file.filename
+        });
+    });
 });
 
-// C. Eliminar Archivo
-app.delete('/api/files/:id', async (req, res) => {
-  try {
-    if (!gridfsBucket) return res.status(500).json({ error: 'DB no lista' });
-    await gridfsBucket.delete(new mongoose.Types.ObjectId(req.params.id));
-    res.json({ message: 'Archivo eliminado' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/files/:filename', async (req, res) => {
+    console.log(`📥 [DOWNLOAD] Solicitud para archivo: ${req.params.filename}`);
+    try {
+        if (!gridfsBucket) {
+            console.error('❌ [DOWNLOAD] Bucket no inicializado (DB no lista)');
+            return res.status(503).json({ error: 'DB no inicializada' });
+        }
+
+        const file = await gfs.files.findOne({ filename: req.params.filename });
+        
+        if (!file) {
+            console.warn('⚠️ [DOWNLOAD] Archivo no encontrado en DB');
+            return res.status(404).json({ error: 'Archivo no encontrado' });
+        }
+
+        let contentType = file.contentType || 'application/octet-stream';
+        if(file.filename.endsWith('.pdf')) contentType = 'application/pdf';
+        
+        console.log(`✅ [DOWNLOAD] Enviando flujo de datos...`);
+        res.set('Content-Type', contentType);
+        res.set('Content-Disposition', `inline; filename="${file.filename}"`);
+
+        const readStream = gridfsBucket.openDownloadStream(file._id);
+        readStream.pipe(res);
+
+    } catch (err) {
+        console.error('🔥 [DOWNLOAD ERROR]', err);
+        res.status(500).json({ error: 'Error descargando archivo' });
+    }
 });
 
-// Iniciar Servidor
-app.listen(port, () => console.log(`🚀 Servidor Backend corriendo en puerto ${port}`));
+app.listen(port, () => {
+    console.log(`---------------------------------------------------`);
+    console.log(`🚀 [SERVER] Servidor escuchando en el puerto ${port}`);
+    console.log(`---------------------------------------------------`);
+});
