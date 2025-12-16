@@ -47,6 +47,7 @@ const mongoURI = "mongodb+srv://Snei88:Sneider1112039944.@cluster0.1hhkn.mongodb
 
 console.log("🔌 [DB] Intentando conectar a MongoDB Atlas...");
 
+// Creamos la conexión
 const conn = mongoose.createConnection(mongoURI, {
     serverSelectionTimeoutMS: 5000, 
     socketTimeoutMS: 45000,
@@ -71,10 +72,10 @@ conn.on('disconnected', () => {
     console.warn('⚠️ [DB] Desconectado de MongoDB');
 });
 
-// 4. CONFIGURACIÓN MULTER
+// 4. CONFIGURACIÓN MULTER (FIX: Usar 'db' en lugar de 'url')
+// Usamos la misma conexión 'conn' para evitar tener múltiples pools y errores de sincronización.
 const storage = new GridFsStorage({
-    url: mongoURI,
-    options: { useUnifiedTopology: true },
+    db: conn, // <--- CRITICAL FIX: Reutilizar la conexión viva
     file: (req, file) => {
         return new Promise((resolve, reject) => {
             console.log(`💾 [STORAGE] Preparando guardado para: ${file.originalname}`);
@@ -120,12 +121,18 @@ app.get('/api/health', (req, res) => {
 app.post('/api/upload', (req, res) => {
     console.log("📤 [UPLOAD] Iniciando proceso de subida...");
     
+    // Verificar estado de DB antes de intentar subir
+    if (conn.readyState !== 1) {
+         console.error('❌ [UPLOAD ERROR] La base de datos no está conectada (State: ' + conn.readyState + ')');
+         return res.status(503).json({ error: 'Base de datos no disponible temporalmente' });
+    }
+
     const uploadSingle = upload.single('file');
 
     uploadSingle(req, res, function (err) {
         if (err) {
             console.error('❌ [UPLOAD ERROR]', err);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: err.message || 'Error subiendo archivo' });
         }
 
         if (!req.file) {
