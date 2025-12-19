@@ -1,3 +1,4 @@
+
 /*
   === BACKEND VISIÓN CALI 500+ ===
   Servidor de Archivos y Base de Datos (Sincronizado)
@@ -22,7 +23,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }));
-app.use(express.json({ limit: '10mb' })); // Aumentado límite para JSON grandes si es necesario
+app.use(express.json({ limit: '20mb' })); 
 
 // --- MONGODB CONNECTION ---
 const mongoURI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/cali500";
@@ -51,7 +52,6 @@ const InstrumentSchema = new mongoose.Schema({
     enlace: String,
     pdf_informe: String,
     description: String,
-    // Campos de Archivos
     archivo_nombre: String,
     archivo_base64: String,
     archivo_tipo: String,
@@ -61,7 +61,7 @@ const InstrumentSchema = new mongoose.Schema({
     archivo_ley_nombre: String,
     archivo_ley_base64: String,
     archivo_ley_tipo: String
-}, { strict: false, collection: 'instruments' }); // 'strict: false' para flexibilidad futura
+}, { strict: false, collection: 'instruments' });
 
 conn.on('connected', () => {
     console.log('✅ [DB] Conectado exitosamente');
@@ -78,7 +78,14 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 
 app.get('/', (req, res) => res.send(`<h1>API Visión Cali 500+</h1><p>DB State: ${conn.readyState}</p>`));
 
-app.get('/api/health', (req, res) => res.json({ status: 'online', dbState: conn.readyState }));
+app.get('/api/health', (req, res) => {
+    // Devolvemos tanto status como dbState para compatibilidad con el frontend
+    res.json({ 
+        status: 'online', 
+        dbState: conn.readyState,
+        db: conn.readyState === 1 ? 1 : 0 
+    });
+});
 
 // 1. OBTENER TODOS LOS INSTRUMENTOS
 app.get('/api/instruments', async (req, res) => {
@@ -99,19 +106,23 @@ app.post('/api/instruments', async (req, res) => {
         const item = req.body;
         if (!item.id) return res.status(400).json({ error: 'ID is required' });
 
+        // CRÍTICO: Eliminar el campo _id del objeto de actualización. 
+        // MongoDB no permite modificar el campo _id original en un update.
+        const { _id, ...updateData } = item;
+
         const result = await InstrumentModel.findOneAndUpdate(
             { id: item.id },
-            item,
+            updateData,
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
         res.json(result);
     } catch (e) {
-        console.error("Error saving instrument:", e);
+        console.error("❌ [API ERROR] Fallo al guardar instrumento:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. SEED INICIAL (Para cuando la DB está vacía)
+// 3. SEED INICIAL
 app.post('/api/instruments/seed', async (req, res) => {
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
     try {
@@ -139,7 +150,7 @@ app.delete('/api/instruments/:id', async (req, res) => {
     }
 });
 
-// 5. SUBIR ARCHIVO (GridFS)
+// 5. SUBIR ARCHIVO
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file' });
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
@@ -147,7 +158,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     const safeName = req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const filename = `${Date.now()}_${safeName}`;
     
-    console.log(`📤 [UPLOAD] ${filename}`);
+    console.log(`📤 [UPLOAD] Procesando: ${filename}`);
 
     const uploadStream = gridfsBucket.openUploadStream(filename, {
         contentType: req.file.mimetype,
@@ -159,8 +170,14 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     readable.push(null);
 
     readable.pipe(uploadStream)
-        .on('error', (e) => res.status(500).json({ error: e.message }))
-        .on('finish', () => res.json({ filename, originalName: req.file.originalname }));
+        .on('error', (e) => {
+            console.error("❌ [UPLOAD ERROR]", e.message);
+            res.status(500).json({ error: e.message });
+        })
+        .on('finish', () => {
+            console.log(`✅ [UPLOAD FINISH] ${filename}`);
+            res.json({ filename, originalName: req.file.originalname });
+        });
 });
 
 // 6. DESCARGAR ARCHIVO
