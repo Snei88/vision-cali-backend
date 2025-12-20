@@ -1,7 +1,7 @@
 
 /*
   === BACKEND VISIÓN CALI 500+ ===
-  Servidor de Archivos y Base de Datos (Sincronizado)
+  Servidor Robusto con Gestión de Cuotas y GridFS
 */
 
 const express = require('express');
@@ -27,12 +27,6 @@ app.use(express.json({ limit: '20mb' }));
 
 // --- MONGODB CONNECTION ---
 const mongoURI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/cali500";
-const safeMongoURI = mongoURI.includes('@') ? mongoURI.replace(/:([^:@]+)@/, ':****@') : 'mongodb://localhost...';
-
-console.log("---------------------------------------------------");
-console.log("🚀 [SERVER] Iniciando Backend Visión Cali 500+");
-console.log(`🔌 [DB] Conectando a: ${safeMongoURI}`);
-
 const conn = mongoose.createConnection(mongoURI, { serverSelectionTimeoutMS: 5000 });
 let gridfsBucket;
 let InstrumentModel;
@@ -72,14 +66,11 @@ conn.on('connected', () => {
 conn.on('error', (err) => console.error('❌ [DB ERROR]', err.message));
 
 // --- UPLOAD CONFIG ---
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // Limitamos a 10MB para cuidar el plan gratuito
 
 // --- ROUTES ---
 
-app.get('/', (req, res) => res.send(`<h1>API Visión Cali 500+</h1><p>DB State: ${conn.readyState}</p>`));
-
 app.get('/api/health', (req, res) => {
-    // Devolvemos tanto status como dbState para compatibilidad con el frontend
     res.json({ 
         status: 'online', 
         dbState: conn.readyState,
@@ -87,27 +78,24 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// 1. OBTENER TODOS LOS INSTRUMENTOS
+// 1. OBTENER INSTRUMENTOS
 app.get('/api/instruments', async (req, res) => {
     if (conn.readyState !== 1) return res.status(503).json([]);
     try {
         const instruments = await InstrumentModel.find({}).sort({ id: 1 });
         res.json(instruments);
     } catch (e) {
-        console.error("Error fetching instruments:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 2. GUARDAR/ACTUALIZAR UN INSTRUMENTO
+// 2. GUARDAR/ACTUALIZAR (Con detección de cuota llena)
 app.post('/api/instruments', async (req, res) => {
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
     try {
         const item = req.body;
         if (!item.id) return res.status(400).json({ error: 'ID is required' });
 
-        // CRÍTICO: Eliminar el campo _id del objeto de actualización. 
-        // MongoDB no permite modificar el campo _id original en un update.
         const { _id, ...updateData } = item;
 
         const result = await InstrumentModel.findOneAndUpdate(
@@ -117,40 +105,39 @@ app.post('/api/instruments', async (req, res) => {
         );
         res.json(result);
     } catch (e) {
-        console.error("❌ [API ERROR] Fallo al guardar instrumento:", e.message);
+        // Error de cuota excedida (Común en MongoDB Atlas Free Tier)
+        if (e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('storage')) {
+            return res.status(507).json({ error: 'DB_FULL' });
+        }
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. SEED INICIAL
-app.post('/api/instruments/seed', async (req, res) => {
-    if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
-    try {
-        const count = await InstrumentModel.countDocuments();
-        if (count > 0) return res.json({ message: 'DB already has data', count });
-
-        const data = req.body;
-        if (!Array.isArray(data)) return res.status(400).json({ error: 'Data must be an array' });
-
-        await InstrumentModel.insertMany(data);
-        console.log(`🌱 [SEED] Base de datos poblada con ${data.length} registros.`);
-        res.json({ success: true, count: data.length });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 4. ELIMINAR INSTRUMENTO
+// 3. ELIMINAR INDIVIDUAL
 app.delete('/api/instruments/:id', async (req, res) => {
     try {
-        await InstrumentModel.deleteOne({ id: req.params.id });
+        await InstrumentModel.deleteOne({ id: Number(req.params.id) });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 5. SUBIR ARCHIVO
+// 4. PURGA COMPLETA (Mantenimiento para liberar espacio)
+app.delete('/api/instruments/purge', async (req, res) => {
+    try {
+        await InstrumentModel.deleteMany({});
+        const files = await conn.db.collection('uploads.files').find().toArray();
+        for (const file of files) {
+            await gridfsBucket.delete(file._id);
+        }
+        res.json({ success: true, message: 'Servidor vaciado correctamente' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 5. SUBIDA DE ARCHIVOS (Con detección de cuota)
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file' });
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
@@ -158,8 +145,6 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     const safeName = req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const filename = `${Date.now()}_${safeName}`;
     
-    console.log(`📤 [UPLOAD] Procesando: ${filename}`);
-
     const uploadStream = gridfsBucket.openUploadStream(filename, {
         contentType: req.file.mimetype,
         metadata: { originalName: req.file.originalname }
@@ -171,11 +156,13 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 
     readable.pipe(uploadStream)
         .on('error', (e) => {
-            console.error("❌ [UPLOAD ERROR]", e.message);
-            res.status(500).json({ error: e.message });
+            if (e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('storage')) {
+                res.status(507).json({ error: 'DB_FULL' });
+            } else {
+                res.status(500).json({ error: e.message });
+            }
         })
         .on('finish', () => {
-            console.log(`✅ [UPLOAD FINISH] ${filename}`);
             res.json({ filename, originalName: req.file.originalname });
         });
 });
@@ -188,14 +175,11 @@ app.get('/api/files/:filename', async (req, res) => {
         if (!file) return res.status(404).json({ error: 'File not found' });
 
         let contentType = file.contentType || 'application/octet-stream';
-        if(file.filename.endsWith('.pdf')) contentType = 'application/pdf';
-        
         res.set('Content-Type', contentType);
-        res.set('Content-Disposition', `inline; filename="${file.filename}"`);
         gridfsBucket.openDownloadStream(file._id).pipe(res);
     } catch (err) {
         res.status(500).json({ error: 'Error retrieving file' });
     }
 });
 
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => console.log(`🚀 Servidor Visión Cali activo en puerto ${port}`));
