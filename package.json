@@ -1,46 +1,35 @@
 
 {
-  "name": "vision-cali-backend",
+  "name": "vision-cali-500-unificado",
   "version": "1.0.0",
-  "description": "Backend y Frontend unificados para Visión Cali 500+",
-  "main": "server.js",
-  "homepage": ".",
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "description": "Ecosistema Digital Visión Cali 500+ - Dashboard e IA",
+  "type": "module",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "start": "node server.js",
-    "local": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject",
-    "predeploy": "npm run build",
-    "deploy": "gh-pages -d build"
+    "deploy": "npm run build && gh-pages -d dist"
   },
   "dependencies": {
+    "@google/genai": "^1.34.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "gh-pages": "^6.1.1",
-    "lucide-react": "^0.263.1",
-    "mongoose": "^7.5.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "lucide-react": "^0.450.0",
+    "mongoose": "^8.3.2",
     "multer": "^1.4.5-lts.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1",
-    "recharts": "^2.8.0",
-    "xlsx": "^0.18.5"
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.12.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.mjs"
   },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "gh-pages": "^6.3.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.2.0"
   }
 }

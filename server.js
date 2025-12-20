@@ -1,7 +1,7 @@
 
 /*
   === BACKEND VISIÓN CALI 500+ ===
-  Servidor Robusto con Gestión de Cuotas y GridFS
+  Servidor Unificado con Gestión de Archivos y Cuotas de Almacenamiento
 */
 
 const express = require('express');
@@ -23,7 +23,7 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }));
-app.use(express.json({ limit: '20mb' })); 
+app.use(express.json({ limit: '30mb' })); // Aumentado para soportar base64 si es necesario
 
 // --- MONGODB CONNECTION ---
 const mongoURI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/cali500";
@@ -31,10 +31,10 @@ const conn = mongoose.createConnection(mongoURI, { serverSelectionTimeoutMS: 500
 let gridfsBucket;
 let InstrumentModel;
 
-// --- SCHEMAS ---
+// --- SCHEMAS (Tu versión completa) ---
 const InstrumentSchema = new mongoose.Schema({
     id: { type: Number, required: true, unique: true },
-    nombre: String,
+    nombre: { type: String, required: true },
     tipo: String,
     eje: String,
     inicio: Number,
@@ -58,7 +58,7 @@ const InstrumentSchema = new mongoose.Schema({
 }, { strict: false, collection: 'instruments' });
 
 conn.on('connected', () => {
-    console.log('✅ [DB] Conectado exitosamente');
+    console.log('✅ [DB] Conectado exitosamente a MongoDB');
     gridfsBucket = new mongoose.mongo.GridFSBucket(conn.db, { bucketName: 'uploads' });
     InstrumentModel = conn.model('Instrument', InstrumentSchema);
 });
@@ -66,19 +66,19 @@ conn.on('connected', () => {
 conn.on('error', (err) => console.error('❌ [DB ERROR]', err.message));
 
 // --- UPLOAD CONFIG ---
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // Limitamos a 10MB para cuidar el plan gratuito
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 // --- ROUTES ---
 
 app.get('/api/health', (req, res) => {
     res.json({ 
         status: 'online', 
-        dbState: conn.readyState,
-        db: conn.readyState === 1 ? 1 : 0 
+        db: conn.readyState === 1 ? 1 : 0,
+        mode: conn.readyState === 1 ? 'cloud' : 'waiting'
     });
 });
 
-// 1. OBTENER INSTRUMENTOS
+// 1. Obtener todos los instrumentos
 app.get('/api/instruments', async (req, res) => {
     if (conn.readyState !== 1) return res.status(503).json([]);
     try {
@@ -89,14 +89,12 @@ app.get('/api/instruments', async (req, res) => {
     }
 });
 
-// 2. GUARDAR/ACTUALIZAR (Con detección de cuota llena)
+// 2. Guardar/Actualizar con gestión de cuota (Lógica de espacio infinito local)
 app.post('/api/instruments', async (req, res) => {
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
     try {
         const item = req.body;
-        if (!item.id) return res.status(400).json({ error: 'ID is required' });
-
-        const { _id, ...updateData } = item;
+        const { _id, ...updateData } = item; // Limpiamos el ID interno de Mongo
 
         const result = await InstrumentModel.findOneAndUpdate(
             { id: item.id },
@@ -105,15 +103,16 @@ app.post('/api/instruments', async (req, res) => {
         );
         res.json(result);
     } catch (e) {
-        // Error de cuota excedida (Común en MongoDB Atlas Free Tier)
+        // Detectar si el almacenamiento gratuito de MongoDB Atlas se llenó
         if (e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('storage')) {
+            console.warn("⚠️ [CUOTA] El servidor MongoDB está lleno. Avisando al frontend para usar modo local.");
             return res.status(507).json({ error: 'DB_FULL' });
         }
         res.status(500).json({ error: e.message });
     }
 });
 
-// 3. ELIMINAR INDIVIDUAL
+// 3. Eliminar Instrumento
 app.delete('/api/instruments/:id', async (req, res) => {
     try {
         await InstrumentModel.deleteOne({ id: Number(req.params.id) });
@@ -123,7 +122,7 @@ app.delete('/api/instruments/:id', async (req, res) => {
     }
 });
 
-// 4. PURGA COMPLETA (Mantenimiento para liberar espacio)
+// 4. Mantenimiento: Purga total
 app.delete('/api/instruments/purge', async (req, res) => {
     try {
         await InstrumentModel.deleteMany({});
@@ -131,13 +130,13 @@ app.delete('/api/instruments/purge', async (req, res) => {
         for (const file of files) {
             await gridfsBucket.delete(file._id);
         }
-        res.json({ success: true, message: 'Servidor vaciado correctamente' });
+        res.json({ success: true, message: 'Servidor vaciado para liberar espacio.' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 5. SUBIDA DE ARCHIVOS (Con detección de cuota)
+// 5. Subida de Archivos con detección de cuota
 app.post('/api/upload', upload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file' });
     if (conn.readyState !== 1) return res.status(503).json({ error: 'DB offline' });
@@ -167,19 +166,18 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
         });
 });
 
-// 6. DESCARGAR ARCHIVO
+// 6. Descarga de Archivos
 app.get('/api/files/:filename', async (req, res) => {
     try {
-        if (!gridfsBucket) return res.status(503).json({ error: 'Service unavailable' });
+        if (!gridfsBucket) return res.status(503).send('Servicio no disponible');
         const file = await conn.db.collection('uploads.files').findOne({ filename: req.params.filename });
-        if (!file) return res.status(404).json({ error: 'File not found' });
+        if (!file) return res.status(404).send('Archivo no encontrado');
 
-        let contentType = file.contentType || 'application/octet-stream';
-        res.set('Content-Type', contentType);
+        res.set('Content-Type', file.contentType || 'application/pdf');
         gridfsBucket.openDownloadStream(file._id).pipe(res);
     } catch (err) {
-        res.status(500).json({ error: 'Error retrieving file' });
+        res.status(500).send('Error recuperando archivo');
     }
 });
 
-app.listen(port, () => console.log(`🚀 Servidor Visión Cali activo en puerto ${port}`));
+app.listen(port, () => console.log(`🚀 Servidor Visión Cali 500+ activo en puerto ${port}`));
